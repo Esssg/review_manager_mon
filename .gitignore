@@ -1,1 +1,7 @@
 *temp*
+.env
+.env.local
+.env.*.local
+AGENTS.md
+.cursor
+
