@@ -35,7 +35,7 @@ curl "http://127.0.0.1:8000/crawl/coupang?platform_account_id=platform-account-u
 
 ## Vercel Deploy
 
-이 저장소는 루트 `app.py`가 `review_manager_mon.api.app:app`을 다시 내보내도록 구성되어 있어 Vercel FastAPI 배포 진입점으로 사용할 수 있습니다.
+이 저장소는 루트 `app.py`와 `pyproject.toml`의 `app` 스크립트가 `review_manager_mon.api.app:app`을 가리키도록 구성되어 있어 Vercel FastAPI 배포 진입점으로 사용할 수 있습니다.
 
 필수 환경 변수는 Vercel 프로젝트의 Settings > Environment Variables에 등록합니다.
 
