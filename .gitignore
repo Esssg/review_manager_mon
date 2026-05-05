@@ -4,4 +4,10 @@
 .env.*.local
 AGENTS.md
 .cursor
-
+*plan*
+*pycache*
+.venv
+*supabase*
+*test*
+.github
+.playwright-mcp
