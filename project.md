@@ -33,6 +33,9 @@
 
 ```text
 .
+├── .cursor/
+│   └── rules/
+│       └── agents.mdc
 ├── README.md
 ├── app.py
 ├── plans.md
@@ -71,6 +74,12 @@
 ```
 
 ## 주요 파일 역할
+
+### Cursor 규칙
+
+- `.cursor/rules/agents.mdc`
+  - `AGENTS.md`의 전역 개발 규칙을 Cursor rules 형식으로 옮긴 파일입니다.
+  - 모든 대화와 작업에 적용되도록 `alwaysApply: true`로 설정되어 있습니다.
 
 ### CLI
 
@@ -361,3 +370,16 @@ curl "https://운영주소.vercel.app/crawl/coupang?platform_account_id=platform
 - 쿠팡 주문상세 HTML의 결제수단 셀렉터가 바뀌면 `extract_payment_method_name()` 수정이 필요할 수 있습니다.
 - 한 주문에 서로 다른 상품이 여러 개 있으면 사용자 답변 기준에 따라 저장하지 않고 skip합니다.
 - 크롤러는 목록 중 이미 저장된 주문번호가 발견된 페이지까지만 탐색합니다.
+
+## .gitignore 작성 규칙
+
+`.gitignore`에는 `*supabase*`, `*test*`, `*plan*` 같은 광범위한 글로브 패턴을 사용하면 안 됩니다. 이 패턴은 의도와 다르게 `src/review_manager_mon/db/supabase_rest.py` 같은 핵심 소스 파일까지 무시 대상에 포함시켜 Vercel 배포 누락의 원인이 됩니다.
+
+대신 다음과 같이 정확한 경로/이름을 지정합니다.
+
+- 루트 마이그레이션 디렉터리만: `/supabase/`
+- 테스트 디렉터리만: `tests/`
+- 캐시 디렉터리만: `__pycache__/`
+- 계획 문서만: `plans.md`
+
+새 파일이나 디렉터리를 무시할 때도 이름만으로 광범위하게 매칭하는 패턴은 피하고, 가능한 한 상위 경로를 명시합니다.
