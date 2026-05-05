@@ -89,6 +89,7 @@
   - FastAPI 앱 진입점입니다.
   - `GET /health`로 서버 상태를 확인합니다.
   - `GET /crawl/coupang`에서 `platform_account_id`, `max_pages` query parameter를 받아 기존 `run_crawler()`를 실행합니다.
+  - Vercel 상태 확인이 크롤러 import 문제와 같이 실패하지 않도록 `run_crawler()`는 크롤링 요청 시점에만 불러옵니다.
 
 - `app.py`
   - Vercel이 기본 FastAPI 진입점으로 찾을 수 있도록 `review_manager_mon.api.app:app`을 다시 내보냅니다.
