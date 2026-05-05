@@ -93,9 +93,6 @@
 - `app.py`
   - Vercel이 기본 FastAPI 진입점으로 찾을 수 있도록 `review_manager_mon.api.app:app`을 다시 내보냅니다.
 
-- `pyproject.toml`
-  - `[project.scripts]`의 `app = "review_manager_mon.api.app:app"` 설정으로 Vercel이 `src` 레이아웃 안의 FastAPI 앱을 찾을 수 있게 합니다.
-
 ### 쿠팡 크롤러
 
 - `src/review_manager_mon/coupang/runner.py`
@@ -266,7 +263,7 @@ uv run python -m unittest discover -s tests
 
 ## Vercel 배포 방법
 
-루트 `app.py`와 `pyproject.toml`의 `app` 스크립트는 Vercel이 FastAPI 앱 객체를 찾기 위한 배포 진입점입니다. 실제 API 로직은 기존 `src/review_manager_mon/api/app.py`를 그대로 사용합니다.
+루트 `app.py`는 Vercel이 FastAPI 앱 객체를 찾기 위한 배포 진입점입니다. 실제 API 로직은 기존 `src/review_manager_mon/api/app.py`를 그대로 사용합니다.
 
 ### 1. Vercel CLI 준비
 

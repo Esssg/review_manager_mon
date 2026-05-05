@@ -10,7 +10,6 @@ dependencies = [
 ]
 
 [project.scripts]
-app = "review_manager_mon.api.app:app"
 crawl-coupang = "review_manager_mon.cli.crawl_coupang:main"
 
 [build-system]
