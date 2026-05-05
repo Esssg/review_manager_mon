@@ -233,7 +233,19 @@ def extract_next_data(response_html: str) -> dict:
         flags=re.DOTALL | re.IGNORECASE,
     )
     if not match:
-        raise ValueError("Coupang response does not include __NEXT_DATA__")
+        # IP 차단/캡차/로그인 페이지 등 어떤 비정상 응답이 왔는지 빠르게 식별하기 위해
+        # 응답 길이, title 태그, 본문 앞부분을 함께 에러 메시지에 담습니다.
+        title_match = re.search(
+            r"<title[^>]*>(.*?)</title>",
+            response_html,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        title = title_match.group(1).strip() if title_match else None
+        snippet = response_html[:500]
+        raise ValueError(
+            "Coupang response does not include __NEXT_DATA__ "
+            f"(length={len(response_html)}, title={title!r}, snippet={snippet!r})"
+        )
 
     # Next.js JSON은 HTML script 안에 들어 있으므로 먼저 HTML entity만 원래 문자로 되돌립니다.
     data = json.loads(html.unescape(match.group(1)).strip())

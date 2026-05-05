@@ -367,6 +367,7 @@ curl "https://운영주소.vercel.app/crawl/coupang?platform_account_id=platform
 - `platform_accounts.curl`에 저장된 쿠팡 쿠키가 만료되면 request가 실패하거나 `orderList`를 찾지 못할 수 있습니다.
 - `GET /crawl/coupang`은 DB에 주문을 저장하는 요청이므로 외부 공개용 엔드포인트로 열지 않는 것을 전제로 합니다.
 - 쿠팡의 `__NEXT_DATA__` 구조가 바뀌면 파서 수정이 필요할 수 있습니다.
+- 쿠팡 응답에 `__NEXT_DATA__`가 없으면 에러 메시지에 응답 length, `<title>` 태그, 본문 앞 500자가 함께 출력되어 차단/캡차/로그인 페이지를 빠르게 구분할 수 있습니다.
 - 쿠팡 주문상세 HTML의 결제수단 셀렉터가 바뀌면 `extract_payment_method_name()` 수정이 필요할 수 있습니다.
 - 한 주문에 서로 다른 상품이 여러 개 있으면 사용자 답변 기준에 따라 저장하지 않고 skip합니다.
 - 크롤러는 목록 중 이미 저장된 주문번호가 발견된 페이지까지만 탐색합니다.
