@@ -34,6 +34,7 @@
 ```text
 .
 ├── README.md
+├── app.py
 ├── plans.md
 ├── project.md
 ├── pyproject.toml
@@ -88,6 +89,12 @@
   - FastAPI 앱 진입점입니다.
   - `GET /health`로 서버 상태를 확인합니다.
   - `GET /crawl/coupang`에서 `platform_account_id`, `max_pages` query parameter를 받아 기존 `run_crawler()`를 실행합니다.
+
+- `app.py`
+  - Vercel이 기본 FastAPI 진입점으로 찾을 수 있도록 `review_manager_mon.api.app:app`을 다시 내보냅니다.
+
+- `pyproject.toml`
+  - `[project.scripts]`의 `app = "review_manager_mon.api.app:app"` 설정으로 Vercel이 `src` 레이아웃 안의 FastAPI 앱을 찾을 수 있게 합니다.
 
 ### 쿠팡 크롤러
 
@@ -256,6 +263,58 @@ GitHub Actions 입력값:
 ```bash
 uv run python -m unittest discover -s tests
 ```
+
+## Vercel 배포 방법
+
+루트 `app.py`와 `pyproject.toml`의 `app` 스크립트는 Vercel이 FastAPI 앱 객체를 찾기 위한 배포 진입점입니다. 실제 API 로직은 기존 `src/review_manager_mon/api/app.py`를 그대로 사용합니다.
+
+### 1. Vercel CLI 준비
+
+```bash
+npm i -g vercel
+vercel login
+vercel link
+```
+
+### 2. 환경 변수 등록
+
+필수:
+
+```bash
+vercel env add SUPABASE_URL production
+vercel env add SUPABASE_SERVICE_ROLE_KEY production
+```
+
+선택:
+
+```bash
+vercel env add CRAWL_MAX_PAGES production
+vercel env add CRAWL_REQUEST_TIMEOUT_MS production
+```
+
+Preview 배포에서도 같은 값을 쓰려면 `production` 대신 `preview`로도 등록합니다.
+
+### 3. Preview 배포와 확인
+
+```bash
+vercel deploy
+curl "https://배포주소.vercel.app/health"
+```
+
+정상 응답:
+
+```json
+{"status":"ok"}
+```
+
+### 4. Production 배포와 크롤링 호출
+
+```bash
+vercel deploy --prod
+curl "https://운영주소.vercel.app/crawl/coupang?platform_account_id=platform-account-uuid&max_pages=5"
+```
+
+크롤링 요청은 외부 쿠팡 페이지와 Supabase를 호출하므로 실행 시간이 길어질 수 있습니다. Vercel의 요청 제한 안에 들어오도록 `max_pages`를 작게 시작해서 확인합니다.
 
 테스트 대상:
 
