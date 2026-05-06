@@ -162,7 +162,7 @@
 - `user_id`: `platform_accounts.user_id`
 - `product_name`: `orderList[].title`
 - `purchase_date`: `orderList[].orderedAt`을 KST 날짜로 변환
-- `purchase_price_krw`: 단일 상품의 `unitPrice`
+- `purchase_price_krw`: 단일 상품의 `discountedUnitPrice`
 - `product_url`: `null`
 - `order_number`: `orderList[].orderId`
 - `platform_id`: `platform_accounts.platform_id`

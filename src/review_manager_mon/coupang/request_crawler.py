@@ -356,12 +356,12 @@ def order_to_payload(order: dict, platform_account: dict, payment_method_id: str
     if len(products) != 1:
         raise MultiProductOrderError(f"Order {order_number} has {len(products)} products and was skipped")
 
-    unit_price = required_value(products[0], "unitPrice")
+    discounted_unit_price = required_value(products[0], "discountedUnitPrice")
     return {
         "user_id": platform_account["user_id"],
         "product_name": str(required_value(order, "title")).strip(),
         "purchase_date": purchase_date_from_millis(required_value(order, "orderedAt")),
-        "purchase_price_krw": unit_price,
+        "purchase_price_krw": discounted_unit_price,
         "product_url": None,
         "order_number": order_number,
         "platform_id": platform_account["platform_id"],
