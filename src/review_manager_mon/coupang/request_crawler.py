@@ -3,23 +3,91 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import html
+from http.cookies import CookieError, SimpleCookie
+from http.cookiejar import Cookie, CookieJar
 from html.parser import HTMLParser
 import json
 import re
 import shlex
+from socket import timeout as SocketTimeout
+from time import sleep
 from typing import Callable, Iterable, Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 
 KST = timezone(timedelta(hours=9))
+COUPANG_REQUEST_ATTEMPTS = 3
+COUPANG_RETRY_DELAYS_SECONDS = (0.5, 1.5)
+RETRYABLE_HTTP_STATUS_CODES = {408, 500, 502, 503, 504}
+BLOCKED_HTTP_STATUS_CODES = {401, 403, 429}
 
 
 @dataclass(frozen=True)
 class ParsedCurl:
     url: str
     headers: dict[str, str]
+
+
+class CoupangCrawlerError(Exception):
+    http_status_code = 502
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stage: str | None = None,
+        upstream_status_code: int | None = None,
+        page_index: int | None = None,
+        order_number: str | None = None,
+        reason: str | None = None,
+        title: str | None = None,
+        content_type: str | None = None,
+        snippet: str | None = None,
+        retryable: bool = False,
+    ):
+        super().__init__(message)
+        self.stage = stage
+        self.upstream_status_code = upstream_status_code
+        self.page_index = page_index
+        self.order_number = order_number
+        self.reason = reason
+        self.title = title
+        self.content_type = content_type
+        self.snippet = snippet
+        self.retryable = retryable
+
+    def to_dict(self) -> dict:
+        detail = {
+            "message": str(self),
+            "stage": self.stage,
+            "upstreamStatusCode": self.upstream_status_code,
+            "pageIndex": self.page_index,
+            "orderNumber": self.order_number,
+            "reason": self.reason,
+            "title": self.title,
+            "contentType": self.content_type,
+            "snippet": self.snippet,
+            "retryable": self.retryable,
+        }
+        return {key: value for key, value in detail.items() if value is not None}
+
+
+class CoupangCurlError(CoupangCrawlerError, ValueError):
+    http_status_code = 422
+
+
+class CoupangRequestError(CoupangCrawlerError):
+    http_status_code = 502
+
+
+class CoupangTimeoutError(CoupangRequestError):
+    http_status_code = 504
+
+
+class CoupangResponseError(CoupangCrawlerError, ValueError):
+    http_status_code = 502
 
 
 class MultiProductOrderError(ValueError):
@@ -39,18 +107,20 @@ def run_request_crawl(
         raise RuntimeError("platform_accounts.curl is empty")
 
     parsed_curl = parse_curl(raw_curl)
+    http_client = CoupangHttpClient(
+        parsed_curl=parsed_curl,
+        timeout_ms=config.request_timeout_ms,
+    )
     page_fetcher = fetch_page or (
         lambda page_index: fetch_order_list_html(
-            parsed_curl=parsed_curl,
+            client=http_client,
             page_index=page_index,
-            timeout_ms=config.request_timeout_ms,
         )
     )
     detail_fetcher = fetch_order_detail or (
         lambda order_number: fetch_order_detail_html(
-            parsed_curl=parsed_curl,
+            client=http_client,
             order_number=order_number,
-            timeout_ms=config.request_timeout_ms,
         )
     )
     payment_method_ids = db.get_coupang_payment_method_mappings()
@@ -60,10 +130,13 @@ def run_request_crawl(
     skipped_multi_product: list[str] = []
     failed: list[dict] = []
     requested_pages: list[int] = []
+    latest_trusted_cookie_header: str | None = None
 
     for page_index in range(config.max_pages):
         requested_pages.append(page_index)
         order_list = extract_order_list(page_fetcher(page_index))
+        if fetch_page is None:
+            latest_trusted_cookie_header = http_client.cookie_header()
         if not order_list:
             break
 
@@ -109,8 +182,21 @@ def run_request_crawl(
         if stop_after_page:
             break
 
+    curl_cookie_updated = False
+    curl_cookie_update_error = None
+    if latest_trusted_cookie_header:
+        try:
+            curl_cookie_updated = update_platform_account_curl_cookie(
+                db=db,
+                platform_account=platform_account,
+                raw_curl=raw_curl,
+                cookie_header=latest_trusted_cookie_header,
+            )
+        except Exception as exc:
+            curl_cookie_update_error = str(exc)
+
     discovered_count = len(inserted) + len(skipped_duplicates) + len(skipped_multi_product) + len(failed)
-    return {
+    result = {
         "platformAccountId": platform_account["id"],
         "requestedPages": requested_pages,
         "discoveredCount": discovered_count,
@@ -118,17 +204,24 @@ def run_request_crawl(
         "skippedDuplicateCount": len(skipped_duplicates),
         "skippedMultiProductCount": len(skipped_multi_product),
         "failedCount": len(failed),
+        "curlCookieUpdated": curl_cookie_updated,
         "inserted": inserted,
         "skipped": skipped_duplicates,
         "skippedMultiProduct": skipped_multi_product,
         "failed": failed,
     }
+    if curl_cookie_update_error:
+        result["curlCookieUpdateError"] = curl_cookie_update_error
+    return result
 
 
 def parse_curl(raw_curl: str) -> ParsedCurl:
-    tokens = shlex.split(raw_curl.replace("\\\n", " "))
+    try:
+        tokens = shlex.split(raw_curl.replace("\\\n", " "))
+    except ValueError as exc:
+        raise CoupangCurlError(f"Invalid curl string: {exc}", stage="curl") from exc
     if not tokens or tokens[0] != "curl":
-        raise ValueError("curl string must start with curl")
+        raise CoupangCurlError("curl string must start with curl", stage="curl")
 
     url: str | None = None
     headers: dict[str, str] = {}
@@ -138,28 +231,50 @@ def parse_curl(raw_curl: str) -> ParsedCurl:
     while index < len(tokens):
         token = tokens[index]
         if token in {"-H", "--header"}:
-            index += 1
-            name, value = parse_header(tokens[index])
+            value, index = curl_option_value(tokens, index, token)
+            name, value = parse_header(value)
             # 압축 응답은 표준 urllib에서 자동 해제되지 않을 수 있어 요청하지 않습니다.
             if name.lower() not in {"accept-encoding", "content-length", "host"}:
                 headers[name] = value
+        elif token.startswith("--header="):
+            name, value = parse_header(token.partition("=")[2])
+            if name.lower() not in {"accept-encoding", "content-length", "host"}:
+                headers[name] = value
         elif token in {"-b", "--cookie", "--cookie-jar"}:
-            index += 1
+            value, index = curl_option_value(tokens, index, token)
             if token != "--cookie-jar":
-                cookies.append(tokens[index])
+                cookies.append(value)
+        elif token.startswith("--cookie="):
+            cookies.append(token.partition("=")[2])
+        elif token.startswith("--cookie-jar="):
+            pass
         elif token == "--compressed":
             pass
+        elif token in {"--url"}:
+            url, index = curl_option_value(tokens, index, token)
+        elif token.startswith("--url="):
+            url = token.partition("=")[2]
+        elif token in {"-A", "--user-agent"}:
+            headers["User-Agent"], index = curl_option_value(tokens, index, token)
+        elif token.startswith("--user-agent="):
+            headers["User-Agent"] = token.partition("=")[2]
+        elif token in {"-e", "--referer"}:
+            headers["Referer"], index = curl_option_value(tokens, index, token)
+        elif token.startswith("--referer="):
+            headers["Referer"] = token.partition("=")[2]
         elif token.startswith("http://") or token.startswith("https://"):
             url = token
         elif token in {"-X", "--request", "--data", "--data-raw", "--data-binary"}:
-            index += 1
+            _, index = curl_option_value(tokens, index, token)
+        elif token.startswith("--request=") or token.startswith("--data=") or token.startswith("--data-raw="):
+            pass
         index += 1
 
     if not url:
-        raise ValueError("curl string does not include a request URL")
+        raise CoupangCurlError("curl string does not include a request URL", stage="curl")
 
-    if cookies:
-        existing_cookie = headers.get("Cookie") or headers.get("cookie")
+    existing_cookie = cookie_header_from_headers(headers)
+    if existing_cookie or cookies:
         cookie_value = "; ".join([*(filter(None, [existing_cookie])), *cookies])
         headers = {key: value for key, value in headers.items() if key.lower() != "cookie"}
         headers["Cookie"] = cookie_value
@@ -170,8 +285,80 @@ def parse_curl(raw_curl: str) -> ParsedCurl:
 def parse_header(value: str) -> tuple[str, str]:
     name, separator, header_value = value.partition(":")
     if not separator or not name.strip():
-        raise ValueError(f"Invalid curl header: {value}")
+        raise CoupangCurlError(f"Invalid curl header: {value}", stage="curl")
     return name.strip(), header_value.strip()
+
+
+def curl_option_value(tokens: list[str], index: int, option: str) -> tuple[str, int]:
+    if index + 1 >= len(tokens):
+        raise CoupangCurlError(f"curl option {option} requires a value", stage="curl")
+    return tokens[index + 1], index + 1
+
+
+def update_platform_account_curl_cookie(
+    *,
+    db,
+    platform_account: dict,
+    raw_curl: str,
+    cookie_header: str,
+) -> bool:
+    updater = getattr(db, "update_platform_account_curl", None)
+    if updater is None:
+        return False
+
+    current_cookie_header = cookie_header_from_headers(parse_curl(raw_curl).headers)
+    if current_cookie_header == cookie_header:
+        return False
+
+    updated_curl = curl_with_cookie(raw_curl, cookie_header)
+    if updated_curl == raw_curl:
+        return False
+
+    updater(platform_account_id=platform_account["id"], curl=updated_curl)
+    return True
+
+
+def curl_with_cookie(raw_curl: str, cookie_header: str) -> str:
+    try:
+        tokens = shlex.split(raw_curl.replace("\\\n", " "))
+    except ValueError as exc:
+        raise CoupangCurlError(f"Invalid curl string: {exc}", stage="curl") from exc
+
+    if not tokens or tokens[0] != "curl":
+        raise CoupangCurlError("curl string must start with curl", stage="curl")
+
+    updated = False
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token in {"-H", "--header"}:
+            value, index = curl_option_value(tokens, index, token)
+            name, _ = parse_header(value)
+            if name.lower() == "cookie":
+                tokens[index] = f"{name}: {cookie_header}"
+                updated = True
+        elif token.startswith("--header="):
+            value = token.partition("=")[2]
+            name, _ = parse_header(value)
+            if name.lower() == "cookie":
+                tokens[index] = f"--header={name}: {cookie_header}"
+                updated = True
+        elif token in {"-b", "--cookie"}:
+            _, index = curl_option_value(tokens, index, token)
+            tokens[index] = cookie_header
+            updated = True
+        elif token.startswith("--cookie="):
+            tokens[index] = f"--cookie={cookie_header}"
+            updated = True
+        elif token == "--cookie-jar":
+            _, index = curl_option_value(tokens, index, token)
+        index += 1
+
+    if not updated:
+        # 기존 cURL에 쿠키 옵션이 없으면 다음 실행에서 같은 세션을 시작할 수 있도록 헤더를 추가합니다.
+        tokens.extend(["-H", f"cookie: {cookie_header}"])
+
+    return shlex.join(tokens)
 
 
 def page_url(url: str, page_index: int) -> str:
@@ -186,28 +373,279 @@ def order_detail_url(url: str, order_number: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, f"/ssr/desktop/order/{order_number}", "", ""))
 
 
-def fetch_order_list_html(*, parsed_curl: ParsedCurl, page_index: int, timeout_ms: int) -> str:
-    request = Request(page_url(parsed_curl.url, page_index), headers=parsed_curl.headers, method="GET")
-    try:
-        with urlopen(request, timeout=timeout_ms / 1000) as response:
-            charset = response.headers.get_content_charset() or "utf-8"
-            return response.read().decode(charset, errors="replace")
-    except HTTPError as exc:
-        raise RuntimeError(f"Coupang order list request failed on pageIndex={page_index} ({exc.code})") from exc
-    except (URLError, TimeoutError) as exc:
-        raise RuntimeError(f"Coupang order list request failed on pageIndex={page_index}: {exc}") from exc
+class CoupangHttpClient:
+    def __init__(
+        self,
+        *,
+        parsed_curl: ParsedCurl,
+        timeout_ms: int,
+        sleeper: Callable[[float], None] = sleep,
+    ):
+        self.parsed_curl = parsed_curl
+        self.timeout_seconds = timeout_ms / 1000
+        self.headers = headers_without_cookie(parsed_curl.headers)
+        self.cookie_jar = cookie_jar_from_headers(parsed_curl.url, parsed_curl.headers)
+        self.opener = build_opener(HTTPCookieProcessor(self.cookie_jar))
+        self.sleeper = sleeper
+
+    def fetch_html(
+        self,
+        url: str,
+        *,
+        stage: str,
+        page_index: int | None = None,
+        order_number: str | None = None,
+    ) -> str:
+        for attempt in range(COUPANG_REQUEST_ATTEMPTS):
+            request = Request(url, headers=self.headers, method="GET")
+            try:
+                with self.opener.open(request, timeout=self.timeout_seconds) as response:
+                    charset = response.headers.get_content_charset() or "utf-8"
+                    return response.read().decode(charset, errors="replace")
+            except HTTPError as exc:
+                error = coupang_http_error(
+                    exc,
+                    stage=stage,
+                    page_index=page_index,
+                    order_number=order_number,
+                )
+                if error.retryable and attempt < COUPANG_REQUEST_ATTEMPTS - 1:
+                    self.sleep_before_retry(attempt)
+                    continue
+                raise error from exc
+            except (URLError, TimeoutError, SocketTimeout) as exc:
+                if attempt < COUPANG_REQUEST_ATTEMPTS - 1:
+                    self.sleep_before_retry(attempt)
+                    continue
+                raise coupang_timeout_error(
+                    exc,
+                    stage=stage,
+                    page_index=page_index,
+                    order_number=order_number,
+                ) from exc
+
+        raise CoupangRequestError("Coupang request failed unexpectedly", stage=stage)
+
+    def sleep_before_retry(self, attempt: int) -> None:
+        # 일시적인 네트워크 오류만 짧게 쉬었다가 다시 시도합니다.
+        delay = COUPANG_RETRY_DELAYS_SECONDS[min(attempt, len(COUPANG_RETRY_DELAYS_SECONDS) - 1)]
+        self.sleeper(delay)
+
+    def cookie_header(self) -> str | None:
+        cookies = [
+            f"{cookie.name}={cookie.value}"
+            for cookie in self.cookie_jar
+            if not cookie.is_expired()
+        ]
+        return "; ".join(cookies) or None
 
 
-def fetch_order_detail_html(*, parsed_curl: ParsedCurl, order_number: str, timeout_ms: int) -> str:
-    request = Request(order_detail_url(parsed_curl.url, order_number), headers=parsed_curl.headers, method="GET")
+def fetch_order_list_html(
+    *,
+    page_index: int,
+    client: CoupangHttpClient | None = None,
+    parsed_curl: ParsedCurl | None = None,
+    timeout_ms: int | None = None,
+) -> str:
+    http_client = client_or_new(client=client, parsed_curl=parsed_curl, timeout_ms=timeout_ms)
+    return http_client.fetch_html(
+        page_url(http_client.parsed_curl.url, page_index),
+        stage="order_list",
+        page_index=page_index,
+    )
+
+
+def fetch_order_detail_html(
+    *,
+    order_number: str,
+    client: CoupangHttpClient | None = None,
+    parsed_curl: ParsedCurl | None = None,
+    timeout_ms: int | None = None,
+) -> str:
+    http_client = client_or_new(client=client, parsed_curl=parsed_curl, timeout_ms=timeout_ms)
+    return http_client.fetch_html(
+        order_detail_url(http_client.parsed_curl.url, order_number),
+        stage="order_detail",
+        order_number=order_number,
+    )
+
+
+def client_or_new(
+    *,
+    client: CoupangHttpClient | None,
+    parsed_curl: ParsedCurl | None,
+    timeout_ms: int | None,
+) -> CoupangHttpClient:
+    if client is not None:
+        return client
+    if parsed_curl is None or timeout_ms is None:
+        raise ValueError("parsed_curl and timeout_ms are required when client is not provided")
+    return CoupangHttpClient(parsed_curl=parsed_curl, timeout_ms=timeout_ms)
+
+
+def headers_without_cookie(headers: dict[str, str]) -> dict[str, str]:
+    return {name: value for name, value in headers.items() if name.lower() != "cookie"}
+
+
+def cookie_header_from_headers(headers: dict[str, str]) -> str | None:
+    for name, value in headers.items():
+        if name.lower() == "cookie":
+            return value
+    return None
+
+
+def cookie_jar_from_headers(url: str, headers: dict[str, str]) -> CookieJar:
+    jar = CookieJar()
+    cookie_header = cookie_header_from_headers(headers)
+    if not cookie_header:
+        return jar
+
+    # cURL에 들어 있던 쿠키를 브라우저 세션의 시작값처럼 CookieJar에 넣습니다.
+    for name, value in parse_cookie_header(cookie_header):
+        jar.set_cookie(make_cookie(url, name, value))
+    return jar
+
+
+def parse_cookie_header(cookie_header: str) -> list[tuple[str, str]]:
     try:
-        with urlopen(request, timeout=timeout_ms / 1000) as response:
-            charset = response.headers.get_content_charset() or "utf-8"
-            return response.read().decode(charset, errors="replace")
-    except HTTPError as exc:
-        raise RuntimeError(f"Coupang order detail request failed for order_number={order_number} ({exc.code})") from exc
-    except (URLError, TimeoutError) as exc:
-        raise RuntimeError(f"Coupang order detail request failed for order_number={order_number}: {exc}") from exc
+        simple_cookie = SimpleCookie()
+        simple_cookie.load(cookie_header)
+    except CookieError:
+        simple_cookie = SimpleCookie()
+
+    if simple_cookie:
+        return [(morsel.key, morsel.value) for morsel in simple_cookie.values()]
+
+    cookies: list[tuple[str, str]] = []
+    for part in cookie_header.split(";"):
+        name, separator, value = part.strip().partition("=")
+        if separator and name:
+            cookies.append((name, value))
+    return cookies
+
+
+def make_cookie(url: str, name: str, value: str) -> Cookie:
+    parts = urlsplit(url)
+    domain = parts.hostname or ""
+    return Cookie(
+        version=0,
+        name=name,
+        value=value,
+        port=None,
+        port_specified=False,
+        domain=domain,
+        domain_specified=False,
+        domain_initial_dot=False,
+        path="/",
+        path_specified=True,
+        secure=parts.scheme == "https",
+        expires=None,
+        discard=True,
+        comment=None,
+        comment_url=None,
+        rest={},
+        rfc2109=False,
+    )
+
+
+def coupang_http_error(
+    exc: HTTPError,
+    *,
+    stage: str,
+    page_index: int | None = None,
+    order_number: str | None = None,
+) -> CoupangRequestError:
+    body = exc.read(4096)
+    debug = response_debug_from_bytes(body, exc.headers)
+    reason = debug.get("reason") or reason_from_status_code(exc.code)
+    retryable = exc.code in RETRYABLE_HTTP_STATUS_CODES and exc.code not in BLOCKED_HTTP_STATUS_CODES
+    return CoupangRequestError(
+        request_error_message(stage=stage, status_code=exc.code, reason=reason),
+        stage=stage,
+        upstream_status_code=exc.code,
+        page_index=page_index,
+        order_number=order_number,
+        reason=reason,
+        title=debug.get("title"),
+        content_type=debug.get("content_type"),
+        snippet=debug.get("snippet"),
+        retryable=retryable,
+    )
+
+
+def coupang_timeout_error(
+    exc: URLError | TimeoutError | SocketTimeout,
+    *,
+    stage: str,
+    page_index: int | None = None,
+    order_number: str | None = None,
+) -> CoupangTimeoutError:
+    return CoupangTimeoutError(
+        f"Coupang {stage} request timed out or failed: {exc}",
+        stage=stage,
+        page_index=page_index,
+        order_number=order_number,
+        reason="timeout_or_network_error",
+    )
+
+
+def request_error_message(*, stage: str, status_code: int, reason: str | None) -> str:
+    reason_text = f", reason={reason}" if reason else ""
+    return f"Coupang {stage} request failed (upstream_status={status_code}{reason_text})"
+
+
+def response_debug_from_bytes(body: bytes, headers) -> dict[str, str]:
+    charset = headers.get_content_charset() if headers else None
+    text = body.decode(charset or "utf-8", errors="replace")
+    debug = response_debug_from_html(text)
+    content_type = headers.get("content-type") if headers else None
+    if content_type:
+        debug["content_type"] = content_type
+    return debug
+
+
+def response_debug_from_html(response_html: str) -> dict[str, str]:
+    title = extract_title(response_html)
+    snippet = response_html[:500]
+    reason = classify_coupang_response(title=title, snippet=snippet)
+    debug = {"snippet": snippet}
+    if title:
+        debug["title"] = title
+    if reason:
+        debug["reason"] = reason
+    return debug
+
+
+def extract_title(response_html: str) -> str | None:
+    title_match = re.search(
+        r"<title[^>]*>(.*?)</title>",
+        response_html,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if not title_match:
+        return None
+    return re.sub(r"\s+", " ", html.unescape(title_match.group(1))).strip() or None
+
+
+def classify_coupang_response(*, title: str | None, snippet: str | None) -> str | None:
+    haystack = f"{title or ''} {snippet or ''}".lower()
+    if any(word in haystack for word in ("captcha", "robot", "access denied", "akamai")):
+        return "blocked_or_challenge"
+    if any(word in haystack for word in ("login", "로그인", "sign in")):
+        return "login_required"
+    if any(word in haystack for word in ("too many requests", "rate limit")):
+        return "rate_limited"
+    return None
+
+
+def reason_from_status_code(status_code: int) -> str:
+    if status_code in {401, 403}:
+        return "blocked_or_login_required"
+    if status_code == 429:
+        return "rate_limited"
+    if status_code in RETRYABLE_HTTP_STATUS_CODES:
+        return "temporary_upstream_error"
+    return "upstream_http_error"
 
 
 def extract_order_list(response_html: str) -> list[dict]:
@@ -222,7 +660,11 @@ def extract_order_list(response_html: str) -> list[dict]:
     if order_list is None:
         order_list = find_order_list(next_data)
     if not isinstance(order_list, list):
-        raise ValueError("Coupang response does not include orderList")
+        raise CoupangResponseError(
+            "Coupang response does not include orderList",
+            stage="parse_order_list",
+            reason="missing_order_list",
+        )
     return [order for order in order_list if isinstance(order, dict)]
 
 
@@ -233,24 +675,32 @@ def extract_next_data(response_html: str) -> dict:
         flags=re.DOTALL | re.IGNORECASE,
     )
     if not match:
-        # IP 차단/캡차/로그인 페이지 등 어떤 비정상 응답이 왔는지 빠르게 식별하기 위해
-        # 응답 길이, title 태그, 본문 앞부분을 함께 에러 메시지에 담습니다.
-        title_match = re.search(
-            r"<title[^>]*>(.*?)</title>",
-            response_html,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
-        title = title_match.group(1).strip() if title_match else None
-        snippet = response_html[:500]
-        raise ValueError(
+        # 차단/로그인/구조 변경 중 무엇인지 API 응답에서 바로 볼 수 있게 핵심 정보만 남깁니다.
+        debug = response_debug_from_html(response_html)
+        raise CoupangResponseError(
             "Coupang response does not include __NEXT_DATA__ "
-            f"(length={len(response_html)}, title={title!r}, snippet={snippet!r})"
+            f"(length={len(response_html)}, title={debug.get('title')!r}, snippet={debug.get('snippet')!r})",
+            stage="parse_next_data",
+            reason=debug.get("reason") or "missing_next_data",
+            title=debug.get("title"),
+            snippet=debug.get("snippet"),
         )
 
     # Next.js JSON은 HTML script 안에 들어 있으므로 먼저 HTML entity만 원래 문자로 되돌립니다.
-    data = json.loads(html.unescape(match.group(1)).strip())
+    try:
+        data = json.loads(html.unescape(match.group(1)).strip())
+    except json.JSONDecodeError as exc:
+        raise CoupangResponseError(
+            f"__NEXT_DATA__ is not valid JSON: {exc}",
+            stage="parse_next_data",
+            reason="invalid_next_data_json",
+        ) from exc
     if not isinstance(data, dict):
-        raise ValueError("__NEXT_DATA__ is not a JSON object")
+        raise CoupangResponseError(
+            "__NEXT_DATA__ is not a JSON object",
+            stage="parse_next_data",
+            reason="invalid_next_data",
+        )
     return data
 
 

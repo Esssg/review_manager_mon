@@ -86,6 +86,23 @@ def update_platform_account_status(
     return rows[0] if rows else None
 
 
+def update_platform_account_curl(
+    client: SupabaseRestClient,
+    *,
+    platform_account_id: str,
+    curl: str,
+) -> dict | None:
+    # 쿠팡이 갱신한 세션 쿠키를 다음 실행에서도 이어 쓸 수 있도록 cURL 문자열만 바꿉니다.
+    rows = client.request(
+        "platform_accounts",
+        method="PATCH",
+        params={"id": f"eq.{platform_account_id}"},
+        headers={"Prefer": "return=representation"},
+        body={"curl": curl},
+    )
+    return rows[0] if rows else None
+
+
 def get_existing_order_numbers(
     client: SupabaseRestClient,
     *,

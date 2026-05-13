@@ -18,6 +18,9 @@ class CrawlerDb:
     def insert_crawl_order(self, payload: dict) -> dict | None:
         return supabase_rest.insert_crawl_order(self.client, payload)
 
+    def update_platform_account_curl(self, **kwargs) -> dict | None:
+        return supabase_rest.update_platform_account_curl(self.client, **kwargs)
+
 
 def run_crawler(args) -> dict:
     config = load_config(args.max_pages)

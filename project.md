@@ -9,7 +9,7 @@
 1. Supabase에서 `platform_accounts` 행을 조회합니다.
 2. 크롤링을 시작하면 해당 `platform_accounts.status`를 `true`로 바꿉니다.
 3. `platform_accounts.curl`에 저장된 Chrome Copy cURL 문자열을 파싱합니다.
-4. 쿠팡 주문목록 URL에 pageIndex를 0부터 붙여 request를 보냅니다.
+4. cURL의 쿠키를 세션 쿠키로 옮긴 뒤, 쿠팡 주문목록 URL에 pageIndex를 0부터 붙여 request를 보냅니다.
 5. 응답 HTML의 `script#__NEXT_DATA__` JSON에서 `orderList`를 추출합니다.
 6. 이미 `crawl_orders` 또는 `orders`에 존재하는 주문번호는 제외합니다.
 7. 단일 상품 주문은 주문상세 URL을 호출해서 결제수단 텍스트를 추출합니다.
@@ -17,7 +17,9 @@
 9. 단일 상품 주문만 `crawl_orders`에 저장하고, 여러 상품 주문은 skip합니다.
 10. 중복 주문번호가 발견된 페이지 또는 최대 페이지에 도달하면 종료합니다.
 11. 크롤링이 정상 종료되거나 실패하면 해당 `platform_accounts.status`를 `false`로 되돌립니다.
-12. 처리 결과를 JSON으로 출력합니다.
+12. 쿠팡이 `Set-Cookie`로 갱신한 쿠키는 같은 실행 안의 다음 목록/상세 request에 이어서 사용합니다.
+13. 주문목록을 정상 파싱한 실행이면 마지막 신뢰 가능한 쿠키로 `platform_accounts.curl`의 쿠키 부분을 갱신합니다.
+14. 처리 결과를 JSON으로 출력합니다.
 
 ## 기술 스택
 
@@ -41,8 +43,6 @@
 ├── plans.md
 ├── project.md
 ├── pyproject.toml
-├── request.txt
-├── response.txt
 ├── src/
 │   └── review_manager_mon/
 │       ├── api/
@@ -98,6 +98,7 @@
   - FastAPI 앱 진입점입니다.
   - `GET /health`로 서버 상태를 확인합니다.
   - `GET /crawl/coupang`에서 `platform_account_id`, `max_pages` query parameter를 받아 기존 `run_crawler()`를 실행합니다.
+  - 쿠팡 요청/응답 오류는 500으로 숨기지 않고 `stage`, `upstreamStatusCode`, `reason`, `title`, `snippet`이 담긴 JSON detail로 반환합니다.
   - Vercel 상태 확인이 크롤러 import 문제와 같이 실패하지 않도록 `run_crawler()`는 크롤링 요청 시점에만 불러옵니다.
 
 - `app.py`
@@ -115,9 +116,13 @@
 
 - `src/review_manager_mon/coupang/request_crawler.py`
   - `platform_accounts.curl` 문자열을 파싱합니다.
+  - cURL의 `Cookie` 헤더를 `CookieJar` 초기값으로 넣고, 쿠팡 응답의 `Set-Cookie`를 다음 request에 반영합니다.
+  - 주문목록 파싱이 성공한 실행의 마지막 쿠키를 기존 cURL의 `Cookie` 헤더 또는 `--cookie` 값에 반영합니다.
+  - timeout, 일시적인 5xx 계열 응답은 짧게 재시도하고, 401/403/429는 반복 요청하지 않고 오류로 분류합니다.
   - pageIndex별 쿠팡 주문목록 request를 보냅니다.
   - 주문번호별 쿠팡 주문상세 request를 보내 결제수단 셀 텍스트를 읽습니다.
   - `__NEXT_DATA__` JSON에서 `orderList`를 추출합니다.
+  - `__NEXT_DATA__`가 없으면 응답 title/snippet을 보고 로그인 필요, 차단/챌린지, rate limit 여부를 분류합니다.
   - 주문 JSON을 `crawl_orders` insert payload로 바꿉니다.
   - 결제수단 텍스트를 DB 매핑값으로 바꿔 `payment_method_id`에 넣습니다.
   - 같은 주문 안에 서로 다른 상품이 여러 개 있으면 저장하지 않고 skip합니다.
@@ -131,7 +136,7 @@
 
 - `src/review_manager_mon/db/supabase_rest.py`
   - Python 표준 라이브러리 `urllib`로 Supabase REST API를 호출합니다.
-  - 플랫폼 계정 조회, 플랫폼 계정 크롤링 상태 업데이트, 기존 주문번호 조회, 쿠팡 결제수단 매핑 조회, 크롤링 주문 저장을 담당합니다.
+  - 플랫폼 계정 조회, 플랫폼 계정 크롤링 상태 업데이트, 플랫폼 계정 cURL 업데이트, 기존 주문번호 조회, 쿠팡 결제수단 매핑 조회, 크롤링 주문 저장을 담당합니다.
 
 ## 데이터베이스
 
@@ -244,6 +249,7 @@ curl "http://127.0.0.1:8000/crawl/coupang?platform_account_id=platform-account-u
   "skippedDuplicateCount": 0,
   "skippedMultiProductCount": 0,
   "failedCount": 0,
+  "curlCookieUpdated": false,
   "inserted": [],
   "skipped": [],
   "skippedMultiProduct": [],
@@ -329,9 +335,12 @@ curl "https://운영주소.vercel.app/crawl/coupang?platform_account_id=platform
 - `.env` 로드
 - 기존 parser helper
 - cURL 파싱
+- cURL 쿠키를 세션 쿠키로 옮기고 정적 `Cookie` 헤더를 제거하는 처리
+- 세션 쿠키를 기존 cURL의 쿠키 값에 다시 반영하는 처리
 - pageIndex URL 생성
 - 주문상세 URL 생성
-- `response.txt` 기반 `orderList` 추출
+- Next.js HTML 기반 `orderList` 추출
+- 차단/챌린지 응답 분류
 - 주문상세 HTML 기반 결제수단 텍스트 추출
 - `orderedAt` KST 날짜 변환
 - 단일 상품 주문 payload 생성
@@ -365,9 +374,13 @@ curl "https://운영주소.vercel.app/crawl/coupang?platform_account_id=platform
 ## 현재 알려진 제약
 
 - `platform_accounts.curl`에 저장된 쿠팡 쿠키가 만료되면 request가 실패하거나 `orderList`를 찾지 못할 수 있습니다.
+- `platform_accounts.curl` 자동 갱신은 주문목록 파싱이 한 번 이상 정상 처리된 실행에서만 수행합니다. 로그인/차단/캡차 응답의 쿠키는 저장하지 않습니다.
+- 쿠키 갱신 DB 저장이 실패해도 크롤링 결과는 반환하며, 이때 응답에 `curlCookieUpdateError`가 포함됩니다.
+- API에서 쿠팡 쪽 실패가 나면 500 대신 보통 502 또는 504로 반환되며, `detail.reason`으로 `login_required`, `blocked_or_challenge`, `rate_limited`, `temporary_upstream_error` 등을 확인합니다.
 - `GET /crawl/coupang`은 DB에 주문을 저장하는 요청이므로 외부 공개용 엔드포인트로 열지 않는 것을 전제로 합니다.
 - 쿠팡의 `__NEXT_DATA__` 구조가 바뀌면 파서 수정이 필요할 수 있습니다.
 - 쿠팡 응답에 `__NEXT_DATA__`가 없으면 에러 메시지에 응답 length, `<title>` 태그, 본문 앞 500자가 함께 출력되어 차단/캡차/로그인 페이지를 빠르게 구분할 수 있습니다.
+- Akamai가 브라우저 JS 챌린지나 TLS/HTTP fingerprint를 요구하는 상황은 표준 라이브러리 request만으로 완전히 재현하기 어렵습니다.
 - 쿠팡 주문상세 HTML의 결제수단 셀렉터가 바뀌면 `extract_payment_method_name()` 수정이 필요할 수 있습니다.
 - 한 주문에 서로 다른 상품이 여러 개 있으면 사용자 답변 기준에 따라 저장하지 않고 skip합니다.
 - 크롤러는 목록 중 이미 저장된 주문번호가 발견된 페이지까지만 탐색합니다.

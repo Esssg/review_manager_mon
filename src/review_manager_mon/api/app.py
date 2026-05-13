@@ -31,4 +31,9 @@ def crawl_coupang(
             )
         )
     except Exception as exc:
+        from review_manager_mon.coupang.request_crawler import CoupangCrawlerError
+
+        if isinstance(exc, CoupangCrawlerError):
+            # 쿠팡 응답 문제는 500으로 숨기지 않고, 어느 단계에서 막혔는지 JSON으로 알려줍니다.
+            raise HTTPException(status_code=exc.http_status_code, detail=exc.to_dict()) from exc
         raise HTTPException(status_code=500, detail=str(exc)) from exc
