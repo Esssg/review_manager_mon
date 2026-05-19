@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import gzip
 import html
+import io
 from http.cookies import CookieError, SimpleCookie
 from http.cookiejar import Cookie, CookieJar
 from html.parser import HTMLParser
@@ -15,6 +17,7 @@ from typing import Callable, Iterable, Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPCookieProcessor, Request, build_opener
+import zlib
 
 
 KST = timezone(timedelta(hours=9))
@@ -233,13 +236,10 @@ def parse_curl(raw_curl: str) -> ParsedCurl:
         if token in {"-H", "--header"}:
             value, index = curl_option_value(tokens, index, token)
             name, value = parse_header(value)
-            # 압축 응답은 표준 urllib에서 자동 해제되지 않을 수 있어 요청하지 않습니다.
-            if name.lower() not in {"accept-encoding", "content-length", "host"}:
-                headers[name] = value
+            headers[name] = value
         elif token.startswith("--header="):
             name, value = parse_header(token.partition("=")[2])
-            if name.lower() not in {"accept-encoding", "content-length", "host"}:
-                headers[name] = value
+            headers[name] = value
         elif token in {"-b", "--cookie", "--cookie-jar"}:
             value, index = curl_option_value(tokens, index, token)
             if token != "--cookie-jar":
@@ -383,7 +383,7 @@ class CoupangHttpClient:
     ):
         self.parsed_curl = parsed_curl
         self.timeout_seconds = timeout_ms / 1000
-        self.headers = headers_without_cookie(parsed_curl.headers)
+        self.headers = dict(parsed_curl.headers)
         self.cookie_jar = cookie_jar_from_headers(parsed_curl.url, parsed_curl.headers)
         self.opener = build_opener(HTTPCookieProcessor(self.cookie_jar))
         self.sleeper = sleeper
@@ -400,8 +400,15 @@ class CoupangHttpClient:
             request = Request(url, headers=self.headers, method="GET")
             try:
                 with self.opener.open(request, timeout=self.timeout_seconds) as response:
-                    charset = response.headers.get_content_charset() or "utf-8"
-                    return response.read().decode(charset, errors="replace")
+                    body = response.read()
+                    self.refresh_cookie_header()
+                    return decode_response_body(
+                        body,
+                        response.headers,
+                        stage=stage,
+                        page_index=page_index,
+                        order_number=order_number,
+                    )
             except HTTPError as exc:
                 error = coupang_http_error(
                     exc,
@@ -438,6 +445,12 @@ class CoupangHttpClient:
             if not cookie.is_expired()
         ]
         return "; ".join(cookies) or None
+
+    def refresh_cookie_header(self) -> None:
+        # 쿠팡이 갱신한 쿠키도 다음 요청의 Cookie 헤더에 그대로 실어 보냅니다.
+        cookie_header = self.cookie_header()
+        if cookie_header:
+            self.headers["Cookie"] = cookie_header
 
 
 def fetch_order_list_html(
@@ -481,10 +494,6 @@ def client_or_new(
     if parsed_curl is None or timeout_ms is None:
         raise ValueError("parsed_curl and timeout_ms are required when client is not provided")
     return CoupangHttpClient(parsed_curl=parsed_curl, timeout_ms=timeout_ms)
-
-
-def headers_without_cookie(headers: dict[str, str]) -> dict[str, str]:
-    return {name: value for name, value in headers.items() if name.lower() != "cookie"}
 
 
 def cookie_header_from_headers(headers: dict[str, str]) -> str | None:
@@ -546,6 +555,94 @@ def make_cookie(url: str, name: str, value: str) -> Cookie:
         rest={},
         rfc2109=False,
     )
+
+
+def decode_response_body(
+    body: bytes,
+    headers,
+    *,
+    stage: str,
+    page_index: int | None = None,
+    order_number: str | None = None,
+) -> str:
+    # cURL의 Accept-Encoding을 그대로 보내므로 쿠팡의 압축 응답을 사람이 읽을 수 있는 HTML로 풉니다.
+    for encoding in reversed(content_encodings(headers)):
+        body = decompress_response_body(
+            body,
+            encoding,
+            stage=stage,
+            page_index=page_index,
+            order_number=order_number,
+        )
+
+    charset = headers.get_content_charset() if headers else None
+    return body.decode(charset or "utf-8", errors="replace")
+
+
+def content_encodings(headers) -> list[str]:
+    content_encoding = headers.get("content-encoding") if headers else None
+    return [
+        encoding.strip().lower()
+        for encoding in (content_encoding or "").split(",")
+        if encoding.strip()
+    ]
+
+
+def decompress_response_body(
+    body: bytes,
+    encoding: str,
+    *,
+    stage: str,
+    page_index: int | None = None,
+    order_number: str | None = None,
+) -> bytes:
+    try:
+        if encoding in {"identity"}:
+            return body
+        if encoding in {"gzip", "x-gzip"}:
+            return gzip.decompress(body)
+        if encoding == "deflate":
+            return decompress_deflate(body)
+        if encoding == "br":
+            import brotli
+
+            return brotli.decompress(body)
+        if encoding == "zstd":
+            import zstandard
+
+            with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(body)) as reader:
+                return reader.read()
+    except ImportError as exc:
+        raise CoupangResponseError(
+            f"Coupang response uses unsupported content encoding: {encoding}",
+            stage=stage,
+            page_index=page_index,
+            order_number=order_number,
+            reason="unsupported_content_encoding",
+        ) from exc
+    except Exception as exc:
+        raise CoupangResponseError(
+            f"Failed to decode Coupang response content encoding: {encoding}",
+            stage=stage,
+            page_index=page_index,
+            order_number=order_number,
+            reason="content_encoding_decode_failed",
+        ) from exc
+
+    raise CoupangResponseError(
+        f"Coupang response uses unknown content encoding: {encoding}",
+        stage=stage,
+        page_index=page_index,
+        order_number=order_number,
+        reason="unknown_content_encoding",
+    )
+
+
+def decompress_deflate(body: bytes) -> bytes:
+    try:
+        return zlib.decompress(body)
+    except zlib.error:
+        return zlib.decompress(body, -zlib.MAX_WBITS)
 
 
 def coupang_http_error(
