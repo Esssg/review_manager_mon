@@ -29,6 +29,7 @@
 - brotli, zstandard 응답 압축 해제
 - FastAPI
 - Uvicorn
+- Python logging 기반 txt 파일 로그
 - Supabase REST API
 - GitHub Actions 수동 실행 워크플로
 
@@ -99,8 +100,14 @@
   - FastAPI 앱 진입점입니다.
   - `GET /health`로 서버 상태를 확인합니다.
   - `GET /crawl/coupang`에서 `platform_account_id`, `max_pages` query parameter를 받아 기존 `run_crawler()`를 실행합니다.
+  - API 요청 성공/실패를 txt 로그에 남겨 서버에 들어오는 스캐닝 요청과 크롤링 호출을 나중에 확인할 수 있게 합니다.
   - 쿠팡 요청/응답 오류는 500으로 숨기지 않고 `stage`, `upstreamStatusCode`, `reason`, `title`, `snippet`이 담긴 JSON detail로 반환합니다.
   - Vercel 상태 확인이 크롤러 import 문제와 같이 실패하지 않도록 `run_crawler()`는 크롤링 요청 시점에만 불러옵니다.
+
+- `src/review_manager_mon/api/logging_config.py`
+  - API 서버의 txt 파일 로그 설정을 담당합니다.
+  - `review_manager_mon`, `uvicorn.error`, `uvicorn.access` 로그를 같은 파일에 기록합니다.
+  - 기본 로그 파일은 `logs/server.log.txt`이며, 파일이 너무 커지지 않도록 회전 로그를 사용합니다.
 
 - `app.py`
   - Vercel이 기본 FastAPI 진입점으로 찾을 수 있도록 `review_manager_mon.api.app:app`을 다시 내보냅니다.
@@ -197,6 +204,9 @@ cp .env.example .env
 
 - `CRAWL_MAX_PAGES`: 주문 목록에서 탐색할 최대 페이지 수입니다. 기본값은 `5`입니다.
 - `CRAWL_REQUEST_TIMEOUT_MS`: 쿠팡 request timeout입니다. 기본값은 `15000`입니다.
+- `SERVER_LOG_FILE`: API 서버 txt 로그 파일 경로입니다. 기본값은 `logs/server.log.txt`입니다.
+- `SERVER_LOG_MAX_BYTES`: 로그 파일 1개의 최대 크기입니다. 기본값은 `10485760`입니다.
+- `SERVER_LOG_BACKUP_COUNT`: 보관할 이전 로그 파일 개수입니다. 기본값은 `5`입니다.
 
 ### 3. cURL 저장
 
@@ -239,6 +249,8 @@ curl "http://127.0.0.1:8000/crawl/coupang?platform_account_id=platform-account-u
 ```
 
 `max_pages`를 생략하면 CLI와 동일하게 `CRAWL_MAX_PAGES` 또는 기본값 `5`를 사용합니다.
+
+API 서버는 기본적으로 `logs/server.log.txt`에 요청 로그와 Uvicorn warning/error 로그를 함께 기록합니다. 로그 파일은 `SERVER_LOG_FILE`로 바꿀 수 있습니다.
 
 성공 시 표준 출력으로 다음 형태의 JSON을 반환합니다.
 
@@ -335,6 +347,7 @@ curl "https://운영주소.vercel.app/crawl/coupang?platform_account_id=platform
 
 - CLI 인자 파싱
 - `.env` 로드
+- API 서버 txt 로그 파일 생성
 - 기존 parser helper
 - cURL 파싱
 - cURL 쿠키를 세션 쿠키로 옮기고 정적 `Cookie` 헤더를 제거하는 처리
@@ -360,6 +373,7 @@ curl "https://운영주소.vercel.app/crawl/coupang?platform_account_id=platform
 - 단일 용도로만 쓰이는 기능은 불필요한 추상화를 만들지 않습니다.
 - Supabase service role key는 로컬 `.env`, GitHub Secrets 같은 서버 측 비밀 저장소에서만 사용합니다.
 - 쿠팡 cURL에는 민감한 쿠키가 포함되므로 로그에 출력하지 않습니다.
+- 서버 로그는 기본적으로 `logs/server.log.txt`에 남기며, 운영 중 파일이 커질 수 있으므로 회전된 이전 로그까지 함께 확인합니다.
 
 ## 중복 방지 기준
 
@@ -368,6 +382,7 @@ curl "https://운영주소.vercel.app/crawl/coupang?platform_account_id=platform
 - 환경 변수 추가 또는 읽기 방식 변경: `src/review_manager_mon/coupang/config.py`, `src/review_manager_mon/utils/env.py`
 - CLI 인자 추가: `src/review_manager_mon/cli/args.py`
 - API 요청 파라미터 추가: `src/review_manager_mon/api/app.py`
+- API 서버 로그 설정 변경: `src/review_manager_mon/api/logging_config.py`
 - 쿠팡 주문목록 request/파싱 변경: `src/review_manager_mon/coupang/request_crawler.py`
 - 쿠팡 주문상세 결제수단 request/파싱 변경: `src/review_manager_mon/coupang/request_crawler.py`
 - Supabase REST 호출 추가: `src/review_manager_mon/db/supabase_rest.py`

@@ -1,12 +1,54 @@
 from __future__ import annotations
 
+import logging
+import time
 from types import SimpleNamespace
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 
+from review_manager_mon.api.logging_config import configure_server_logging
+
+
+configure_server_logging()
 
 app = FastAPI(title="review_manager_mon")
+logger = logging.getLogger("review_manager_mon.api")
+
+
+@app.middleware("http")
+async def log_http_request(request: Request, call_next):
+    started_at = time.perf_counter()
+    client_host = request.client.host if request.client else "-"
+    request_target = str(request.url.path)
+    if request.url.query:
+        request_target = f"{request_target}?{request.url.query}"
+
+    try:
+        response = await call_next(request)
+    except Exception:
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        # 라우트 처리 중 예외가 나도 어떤 요청에서 실패했는지 나중에 txt 로그로 추적할 수 있게 남깁니다.
+        logger.exception(
+            "request_failed client=%s method=%s path=%s elapsed_ms=%.2f",
+            client_host,
+            request.method,
+            request_target,
+            elapsed_ms,
+        )
+        raise
+
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    # 정상 응답과 404 같은 스캐닝 요청을 같은 형식으로 남겨 빈번한 외부 접근을 집계하기 쉽게 합니다.
+    logger.info(
+        "request_done client=%s method=%s path=%s status=%s elapsed_ms=%.2f",
+        client_host,
+        request.method,
+        request_target,
+        response.status_code,
+        elapsed_ms,
+    )
+    return response
 
 
 @app.get("/health")

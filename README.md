@@ -46,6 +46,11 @@ curl "http://127.0.0.1:8000/crawl/coupang?platform_account_id=platform-account-u
 
 - `CRAWL_MAX_PAGES`: 기본값 `5`
 - `CRAWL_REQUEST_TIMEOUT_MS`: 기본값 `15000`
+- `SERVER_LOG_FILE`: API 서버 txt 로그 파일 경로입니다. 기본값은 `logs/server.log.txt`입니다.
+- `SERVER_LOG_MAX_BYTES`: 로그 파일 1개의 최대 크기입니다. 기본값은 `10485760`입니다.
+- `SERVER_LOG_BACKUP_COUNT`: 보관할 이전 로그 파일 개수입니다. 기본값은 `5`입니다.
+
+API 서버는 FastAPI 요청 로그와 Uvicorn access/error 로그를 `SERVER_LOG_FILE`에 함께 남깁니다.
 
 CLI 배포:
 
@@ -77,6 +82,9 @@ curl "https://your-vercel-domain.vercel.app/crawl/coupang?platform_account_id=pl
 
 - `CRAWL_MAX_PAGES`: 기본값 `5`
 - `CRAWL_REQUEST_TIMEOUT_MS`: 기본값 `15000`
+- `SERVER_LOG_FILE`: 기본값 `logs/server.log.txt`
+- `SERVER_LOG_MAX_BYTES`: 기본값 `10485760`
+- `SERVER_LOG_BACKUP_COUNT`: 기본값 `5`
 
 ## Supabase MCP
 
