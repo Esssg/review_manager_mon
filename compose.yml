@@ -1,0 +1,11 @@
+services:
+  review-manager-mon:
+    build: .
+    container_name: review-manager-mon
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8010:8000"
+    volumes:
+      - ./logs:/app/logs
