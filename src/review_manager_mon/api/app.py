@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 
 from review_manager_mon.api.logging_config import configure_server_logging
 
@@ -13,6 +14,17 @@ from review_manager_mon.api.logging_config import configure_server_logging
 configure_server_logging()
 
 app = FastAPI(title="review_manager_mon")
+# 운영 웹과 로컬 개발 서버에서 API를 직접 호출할 때 브라우저 preflight 요청을 허용합니다.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://review-manager.jinitlab.com",
+        "http://localhost:3000",
+        "http://localhost:5173",
+    ],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+)
 logger = logging.getLogger("review_manager_mon.api")
 
 

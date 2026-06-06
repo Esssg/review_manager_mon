@@ -100,6 +100,8 @@
   - FastAPI 앱 진입점입니다.
   - `GET /health`로 서버 상태를 확인합니다.
   - `GET /crawl/coupang`에서 `platform_account_id`, `max_pages` query parameter를 받아 기존 `run_crawler()`를 실행합니다.
+  - `https://review-manager.jinitlab.com`, `http://localhost:3000`, `http://localhost:5173`에서 API를 직접 호출할 수 있도록 CORS를 허용합니다.
+  - CORS preflight `OPTIONS` 요청은 FastAPI의 `CORSMiddleware`가 처리하며, `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS` 메서드와 `Content-Type`, `Authorization` 헤더를 허용합니다.
   - API 요청 성공/실패를 txt 로그에 남겨 서버에 들어오는 스캐닝 요청과 크롤링 호출을 나중에 확인할 수 있게 합니다.
   - 쿠팡 요청/응답 오류는 500으로 숨기지 않고 `stage`, `upstreamStatusCode`, `reason`, `title`, `snippet`이 담긴 JSON detail로 반환합니다.
   - Vercel 상태 확인이 크롤러 import 문제와 같이 실패하지 않도록 `run_crawler()`는 크롤링 요청 시점에만 불러옵니다.
@@ -348,6 +350,7 @@ curl "https://운영주소.vercel.app/crawl/coupang?platform_account_id=platform
 - CLI 인자 파싱
 - `.env` 로드
 - API 서버 txt 로그 파일 생성
+- 운영 웹과 localhost의 CORS preflight 허용 및 미등록 Origin 차단
 - 기존 parser helper
 - cURL 파싱
 - cURL 쿠키를 세션 쿠키로 옮기고 정적 `Cookie` 헤더를 제거하는 처리
@@ -382,6 +385,7 @@ curl "https://운영주소.vercel.app/crawl/coupang?platform_account_id=platform
 - 환경 변수 추가 또는 읽기 방식 변경: `src/review_manager_mon/coupang/config.py`, `src/review_manager_mon/utils/env.py`
 - CLI 인자 추가: `src/review_manager_mon/cli/args.py`
 - API 요청 파라미터 추가: `src/review_manager_mon/api/app.py`
+- API CORS 허용 Origin, 메서드, 헤더 변경: `src/review_manager_mon/api/app.py`
 - API 서버 로그 설정 변경: `src/review_manager_mon/api/logging_config.py`
 - 쿠팡 주문목록 request/파싱 변경: `src/review_manager_mon/coupang/request_crawler.py`
 - 쿠팡 주문상세 결제수단 request/파싱 변경: `src/review_manager_mon/coupang/request_crawler.py`
