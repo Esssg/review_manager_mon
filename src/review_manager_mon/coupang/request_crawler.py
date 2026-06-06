@@ -315,7 +315,10 @@ def update_platform_account_curl_cookie(
     if updated_curl == raw_curl:
         return False
 
-    updater(platform_account_id=platform_account["id"], curl=updated_curl)
+    updated_row = updater(platform_account_id=platform_account["id"], curl=updated_curl)
+    # Supabase가 실제로 같은 cURL을 저장한 행을 반환해야 갱신 성공으로 판단합니다.
+    if not updated_row or updated_row.get("curl") != updated_curl:
+        raise RuntimeError("platform_accounts.curl update was not confirmed")
     return True
 
 

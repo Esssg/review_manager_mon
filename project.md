@@ -130,6 +130,7 @@
   - cURL 쿠키는 도메인 정보가 없으므로, 응답에서 같은 이름의 실제 쿠키가 오면 기존 임시 쿠키를 제거해 오래된 값이 중복 전송되지 않게 합니다.
   - cURL의 `Accept-Encoding`을 그대로 보낼 수 있도록 gzip, deflate, br, zstd 응답 압축을 해제합니다.
   - 주문목록 파싱이 성공한 실행은 상세 request까지 끝난 시점의 최종 쿠키를 기존 cURL의 `Cookie` 헤더 또는 `--cookie` 값에 한 번 반영합니다.
+  - Supabase가 변경된 cURL이 담긴 행을 반환한 경우에만 `curlCookieUpdated`를 `true`로 응답합니다.
   - timeout, 일시적인 5xx 계열 응답은 짧게 재시도하고, 401/403/429는 반복 요청하지 않고 오류로 분류합니다.
   - pageIndex별 쿠팡 주문목록 request를 보냅니다.
   - 주문번호별 쿠팡 주문상세 request를 보내 결제수단 셀 텍스트를 읽습니다.
