@@ -20,7 +20,8 @@ app.add_middleware(
     allow_origins=[
         "https://review-manager.jinitlab.com",
         "http://localhost:3000",
-        "http://localhost:5173",
+        "https://localhost",
+        "capacitor://localhost",
     ],
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],

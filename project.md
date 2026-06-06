@@ -100,7 +100,7 @@
   - FastAPI 앱 진입점입니다.
   - `GET /health`로 서버 상태를 확인합니다.
   - `GET /crawl/coupang`에서 `platform_account_id`, `max_pages` query parameter를 받아 기존 `run_crawler()`를 실행합니다.
-  - `https://review-manager.jinitlab.com`, `http://localhost:3000`, `http://localhost:5173`에서 API를 직접 호출할 수 있도록 CORS를 허용합니다.
+  - 운영 웹 `https://review-manager.jinitlab.com`, 로컬 웹 `http://localhost:3000`, Android Capacitor `https://localhost`, iOS Capacitor `capacitor://localhost`에서 API를 직접 호출할 수 있도록 CORS를 허용합니다.
   - CORS preflight `OPTIONS` 요청은 FastAPI의 `CORSMiddleware`가 처리하며, `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS` 메서드와 `Content-Type`, `Authorization` 헤더를 허용합니다.
   - API 요청 성공/실패를 txt 로그에 남겨 서버에 들어오는 스캐닝 요청과 크롤링 호출을 나중에 확인할 수 있게 합니다.
   - 쿠팡 요청/응답 오류는 500으로 숨기지 않고 `stage`, `upstreamStatusCode`, `reason`, `title`, `snippet`이 담긴 JSON detail로 반환합니다.
