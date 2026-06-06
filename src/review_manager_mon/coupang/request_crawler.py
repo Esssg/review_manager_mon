@@ -133,13 +133,13 @@ def run_request_crawl(
     skipped_multi_product: list[str] = []
     failed: list[dict] = []
     requested_pages: list[int] = []
-    latest_trusted_cookie_header: str | None = None
+    has_trusted_order_list_response = False
 
     for page_index in range(config.max_pages):
         requested_pages.append(page_index)
         order_list = extract_order_list(page_fetcher(page_index))
         if fetch_page is None:
-            latest_trusted_cookie_header = http_client.cookie_header()
+            has_trusted_order_list_response = True
         if not order_list:
             break
 
@@ -187,13 +187,14 @@ def run_request_crawl(
 
     curl_cookie_updated = False
     curl_cookie_update_error = None
-    if latest_trusted_cookie_header:
+    final_cookie_header = http_client.cookie_header() if has_trusted_order_list_response else None
+    if final_cookie_header:
         try:
             curl_cookie_updated = update_platform_account_curl_cookie(
                 db=db,
                 platform_account=platform_account,
                 raw_curl=raw_curl,
-                cookie_header=latest_trusted_cookie_header,
+                cookie_header=final_cookie_header,
             )
         except Exception as exc:
             curl_cookie_update_error = str(exc)
@@ -385,6 +386,10 @@ class CoupangHttpClient:
         self.timeout_seconds = timeout_ms / 1000
         self.headers = dict(parsed_curl.headers)
         self.cookie_jar = cookie_jar_from_headers(parsed_curl.url, parsed_curl.headers)
+        self.seeded_cookies = {
+            (cookie.domain, cookie.path, cookie.name): cookie
+            for cookie in self.cookie_jar
+        }
         self.opener = build_opener(HTTPCookieProcessor(self.cookie_jar))
         self.sleeper = sleeper
 
@@ -401,6 +406,7 @@ class CoupangHttpClient:
             try:
                 with self.opener.open(request, timeout=self.timeout_seconds) as response:
                     body = response.read()
+                    self.discard_replaced_seed_cookies()
                     self.refresh_cookie_header()
                     return decode_response_body(
                         body,
@@ -451,6 +457,28 @@ class CoupangHttpClient:
         cookie_header = self.cookie_header()
         if cookie_header:
             self.headers["Cookie"] = cookie_header
+
+    def discard_replaced_seed_cookies(self) -> None:
+        cookies = list(self.cookie_jar)
+        current_by_key = {
+            (cookie.domain, cookie.path, cookie.name): cookie
+            for cookie in cookies
+        }
+
+        for key, seeded_cookie in list(self.seeded_cookies.items()):
+            current_cookie = current_by_key.get(key)
+            if current_cookie is not seeded_cookie:
+                self.seeded_cookies.pop(key, None)
+                continue
+
+            if any(cookie.name == seeded_cookie.name and cookie is not seeded_cookie for cookie in cookies):
+                # cURL에는 도메인 정보가 없으므로, 응답이 같은 이름의 실제 쿠키를 주면 임시 쿠키를 버립니다.
+                self.cookie_jar.clear(
+                    seeded_cookie.domain,
+                    seeded_cookie.path,
+                    seeded_cookie.name,
+                )
+                self.seeded_cookies.pop(key, None)
 
 
 def fetch_order_list_html(

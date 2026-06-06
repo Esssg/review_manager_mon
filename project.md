@@ -17,8 +17,8 @@
 9. 단일 상품 주문만 `crawl_orders`에 저장하고, 여러 상품 주문은 skip합니다.
 10. 중복 주문번호가 발견된 페이지 또는 최대 페이지에 도달하면 종료합니다.
 11. 크롤링이 정상 종료되거나 실패하면 해당 `platform_accounts.status`를 `false`로 되돌립니다.
-12. 쿠팡이 `Set-Cookie`로 갱신한 쿠키는 같은 실행 안의 다음 목록/상세 request의 `Cookie` 헤더에 이어서 사용합니다.
-13. 주문목록을 정상 파싱한 실행이면 마지막 신뢰 가능한 쿠키로 `platform_accounts.curl`의 쿠키 부분을 갱신합니다.
+12. 쿠팡이 `Set-Cookie`로 갱신한 쿠키는 같은 실행 안의 다음 목록/상세 request의 `Cookie` 헤더에 이어서 사용합니다. cURL에서 임시로 만든 쿠키와 응답 쿠키의 이름이 같으면 응답 쿠키를 우선합니다.
+13. 주문목록을 정상 파싱한 실행이면 모든 목록/상세 request가 끝난 뒤 최종 쿠키로 `platform_accounts.curl`의 쿠키 부분을 한 번 갱신합니다.
 14. 처리 결과를 JSON으로 출력합니다.
 
 ## 기술 스택
@@ -127,8 +127,9 @@
 - `src/review_manager_mon/coupang/request_crawler.py`
   - `platform_accounts.curl` 문자열을 파싱합니다.
   - cURL의 헤더와 `Cookie` 헤더를 요청 헤더에 그대로 넣고, 쿠팡 응답의 `Set-Cookie`를 다음 request에 반영합니다.
+  - cURL 쿠키는 도메인 정보가 없으므로, 응답에서 같은 이름의 실제 쿠키가 오면 기존 임시 쿠키를 제거해 오래된 값이 중복 전송되지 않게 합니다.
   - cURL의 `Accept-Encoding`을 그대로 보낼 수 있도록 gzip, deflate, br, zstd 응답 압축을 해제합니다.
-  - 주문목록 파싱이 성공한 실행의 마지막 쿠키를 기존 cURL의 `Cookie` 헤더 또는 `--cookie` 값에 반영합니다.
+  - 주문목록 파싱이 성공한 실행은 상세 request까지 끝난 시점의 최종 쿠키를 기존 cURL의 `Cookie` 헤더 또는 `--cookie` 값에 한 번 반영합니다.
   - timeout, 일시적인 5xx 계열 응답은 짧게 재시도하고, 401/403/429는 반복 요청하지 않고 오류로 분류합니다.
   - pageIndex별 쿠팡 주문목록 request를 보냅니다.
   - 주문번호별 쿠팡 주문상세 request를 보내 결제수단 셀 텍스트를 읽습니다.
